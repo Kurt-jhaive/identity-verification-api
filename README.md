@@ -5,8 +5,12 @@ A production-ready FastAPI backend for face matching between live selfies and ID
 ## Features
 
 ✅ **Privacy-First**: Images are processed entirely in memory - never saved to disk  
+✅ **3-Step Verification Workflow**: Separate endpoints for ID verification, selfie verification, and face matching  
+✅ **Advanced Fraud Detection**: Detects edited images, screenshots, moiré patterns, and digital artifacts  
+✅ **Quality Scoring**: Automated blur detection, brightness analysis, and resolution validation  
 ✅ **Face Detection**: Automatically detects faces in both images  
 ✅ **Face Matching**: Uses Euclidean distance for accurate face comparison  
+✅ **Philippine National ID Support**: Optimized for Philippine Government ID validation  
 ✅ **Detailed Error Codes**: Specific error responses for frontend handling  
 ✅ **Production-Ready**: Includes logging, error handling, and CORS support  
 ✅ **React Native Compatible**: Multipart form-data support with clear JSON responses  
@@ -80,9 +84,81 @@ Once running, visit:
 
 ## API Endpoints
 
-### `POST /api/verify`
+### Recommended Workflow (3 Steps)
 
-Verify identity by comparing a live selfie with an ID card photo.
+#### Step 1: `POST /api/verify-id` - Verify ID Card Quality
+
+Validate ID card before proceeding to face matching.
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Parameters:
+  - `id_card`: Image file (JPEG/PNG)
+
+**Success Response (200):**
+```json
+{
+  "valid": true,
+  "message": "ID card verification successful. Proceed to face matching.",
+  "quality_score": 87.5,
+  "fraud_risk": "low",
+  "fraud_indicators": [],
+  "details": {
+    "face_detected": true,
+    "blur_score": 145.32,
+    "brightness": 128.5,
+    "edge_density": 0.08,
+    "aspect_ratio": 1.59,
+    "has_exif": true
+  }
+}
+```
+
+**Quality Checks:**
+- ✅ Blur detection (Laplacian variance)
+- ✅ Brightness validation
+- ✅ Face detection (exactly one face required)
+- ✅ Fraud indicators (edited images, screenshots, moiré patterns)
+- ✅ Aspect ratio validation for Philippine National ID
+- ✅ Resolution and edge density analysis
+
+#### Step 2: `POST /api/verify-selfie` - Verify Selfie Quality
+
+Validate selfie quality before face matching.
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Parameters:
+  - `selfie`: Image file (JPEG/PNG)
+
+**Success Response (200):**
+```json
+{
+  "valid": true,
+  "message": "Selfie verification successful. Proceed to face matching.",
+  "quality_score": 92.0,
+  "fraud_risk": "low",
+  "fraud_indicators": [],
+  "details": {
+    "face_detected": true,
+    "blur_score": 156.8,
+    "brightness": 135.2,
+    "aspect_ratio": 0.75,
+    "has_exif": true
+  }
+}
+```
+
+**Quality Checks:**
+- ✅ Blur detection
+- ✅ Brightness validation
+- ✅ Face detection (exactly one face required)
+- ✅ Fraud indicators (edited images, screenshots)
+- ✅ EXIF metadata validation
+
+#### Step 3: `POST /api/verify` - Match Faces
+
+Compare selfie and ID card faces (use after both images pass quality checks).
 
 **Request:**
 - Content-Type: `multipart/form-data`
@@ -94,8 +170,25 @@ Verify identity by comparing a live selfie with an ID card photo.
 ```json
 {
   "match": true,
-  "confidence_score": 98.5,
-  "message": "Verification successful. The faces match."
+  "confidence_score": 94.5,
+  "message": "Verification successful. The faces match.",
+  "distance": 0.3842,
+  "warning": null,
+  "fraud_risk": "low",
+  "fraud_indicators": []
+}
+```
+
+**Failed Match Response (200):**
+```json
+{
+  "match": false,
+  "confidence_score": 45.2,
+  "message": "Verification failed. The faces do not match.",
+  "distance": 0.7156,
+  "warning": null,
+  "fraud_risk": "medium",
+  "fraud_indicators": ["Image is blurry (score: 85.32)"]
 }
 ```
 
@@ -107,6 +200,10 @@ Verify identity by comparing a live selfie with an ID card photo.
   "message": "No face detected in selfie. Please ensure the face is clearly visible and well-lit."
 }
 ```
+
+### Alternative: Single-Step Verification
+
+You can also use `POST /api/verify` directly for a complete verification in one call (includes all quality checks + face matching).
 
 ### Error Codes
 
@@ -139,19 +236,156 @@ Health check endpoint to verify the service is running.
 
 ## Configuration
 
-You can adjust the face matching threshold in `main.py`:
+You can adjust various thresholds in `main.py`:
 
+### Face Matching
 ```python
-FACE_MATCH_THRESHOLD = 0.6  # Lower is more strict (recommended: 0.5-0.6)
+FACE_MATCH_THRESHOLD = 0.5  # Lower is more strict (recommended: 0.5-0.6)
 ```
 
-- **0.6**: Recommended for most use cases (balanced)
-- **0.5**: More strict (fewer false positives, but may reject valid matches)
+- **0.5**: High security (default) - fewer false positives
+- **0.6**: Balanced for most use cases
 - **0.7**: More lenient (more false positives)
+
+### Fraud Detection Thresholds
+```python
+MIN_IMAGE_QUALITY_SCORE = 20      # Minimum average brightness
+MAX_BLUR_SCORE = 100              # Maximum acceptable blur (lower = blurrier)
+MIN_EDGE_DENSITY = 0.05           # Minimum edge density for real documents
+IDENTICAL_IMAGE_THRESHOLD = 0.02  # Distance threshold for identical images
+```
+
+### Quality Score Requirements
+- Minimum quality score for ID: **60/100**
+- Minimum quality score for selfie: **60/100**
+- Fraud risk cannot be "high" for valid verification
 
 ## React Native Integration
 
-### Example Request
+### Recommended 3-Step Workflow
+
+```javascript
+const verifyIdentityWorkflow = async (selfieUri, idCardUri) => {
+  const API_BASE = 'http://YOUR_SERVER_IP:8000';
+  
+  // Step 1: Verify ID Card Quality
+  const verifyID = async () => {
+    const formData = new FormData();
+    formData.append('id_card', {
+      uri: idCardUri,
+      type: 'image/jpeg',
+      name: 'id_card.jpg',
+    });
+    
+    const response = await fetch(`${API_BASE}/api/verify-id`, {
+      method: 'POST',
+      body: formData,
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`ID Verification Failed: ${result.message}`);
+    }
+    
+    if (!result.valid) {
+      throw new Error(`ID Quality Check Failed: ${result.message}`);
+    }
+    
+    console.log(`✓ ID Valid - Quality: ${result.quality_score}%, Risk: ${result.fraud_risk}`);
+    return result;
+  };
+  
+  // Step 2: Verify Selfie Quality
+  const verifySelfie = async () => {
+    const formData = new FormData();
+    formData.append('selfie', {
+      uri: selfieUri,
+      type: 'image/jpeg',
+      name: 'selfie.jpg',
+    });
+    
+    const response = await fetch(`${API_BASE}/api/verify-selfie`, {
+      method: 'POST',
+      body: formData,
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`Selfie Verification Failed: ${result.message}`);
+    }
+    
+    if (!result.valid) {
+      throw new Error(`Selfie Quality Check Failed: ${result.message}`);
+    }
+    
+    console.log(`✓ Selfie Valid - Quality: ${result.quality_score}%, Risk: ${result.fraud_risk}`);
+    return result;
+  };
+  
+  // Step 3: Match Faces
+  const matchFaces = async () => {
+    const formData = new FormData();
+    formData.append('selfie', {
+      uri: selfieUri,
+      type: 'image/jpeg',
+      name: 'selfie.jpg',
+    });
+    formData.append('id_card', {
+      uri: idCardUri,
+      type: 'image/jpeg',
+      name: 'id_card.jpg',
+    });
+    
+    const response = await fetch(`${API_BASE}/api/verify`, {
+      method: 'POST',
+      body: formData,
+    });
+    
+    const result = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`Face Matching Failed: ${result.message}`);
+    }
+    
+    return result;
+  };
+  
+  try {
+    // Execute 3-step workflow
+    const idResult = await verifyID();
+    const selfieResult = await verifySelfie();
+    const matchResult = await matchFaces();
+    
+    if (matchResult.match) {
+      console.log(`✓ VERIFIED! Confidence: ${matchResult.confidence_score}%`);
+      if (matchResult.warning) {
+        console.warn(`⚠ Warning: ${matchResult.warning}`);
+      }
+      return {
+        success: true,
+        confidence: matchResult.confidence_score,
+        fraudRisk: matchResult.fraud_risk,
+      };
+    } else {
+      console.log('✗ Verification failed: Faces do not match');
+      return {
+        success: false,
+        message: matchResult.message,
+      };
+    }
+  } catch (error) {
+    console.error('Verification error:', error.message);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+};
+```
+
+### Single-Step Verification (Alternative)
 
 ```javascript
 const verifyIdentity = async (selfieUri, idCardUri) => {
@@ -173,9 +407,6 @@ const verifyIdentity = async (selfieUri, idCardUri) => {
     const response = await fetch('http://YOUR_SERVER_IP:8000/api/verify', {
       method: 'POST',
       body: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
     });
     
     const result = await response.json();
