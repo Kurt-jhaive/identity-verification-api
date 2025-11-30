@@ -30,10 +30,6 @@ COPY main.py .
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=10s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')" || exit 1
-
 # Run the application with optimized settings for memory-constrained environments
 # - Single worker to prevent memory exhaustion with large images
 # - Increased timeout for face recognition processing (120s)
