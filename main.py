@@ -17,6 +17,7 @@ import cv2
 from datetime import datetime
 from scipy.spatial import distance as scipy_distance
 import math
+import gc  # For memory management
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -100,8 +101,9 @@ CONFIDENCE_MULTIPLIER = 100  # For converting distance to percentage
 IDENTICAL_IMAGE_THRESHOLD = 0.02  # Distance below this means likely same image
 MIN_FACE_SIZE = (30, 30)  # Minimum face dimensions in pixels (relaxed for better detection)
 ALLOW_MULTIPLE_FACES = True  # Allow multiple faces and select the best one (more flexible)
-NUM_JITTERS = 2  # Number of times to resample face for encoding (higher = more accurate but slower)
+NUM_JITTERS = 1  # Reduced from 2 to save memory (still accurate enough)
 TARGET_IMAGE_SIZE = 800  # Maximum dimension for image preprocessing
+MAX_IMAGE_PIXELS = 1500  # Maximum dimension for initial resize (memory optimization)
 FACE_PADDING = 0.25  # Padding around detected face (25% on each side)
 BORDERLINE_DISTANCE_MIN = 0.55  # Start of borderline range for secondary checks
 BORDERLINE_DISTANCE_MAX = 0.70  # End of borderline range
@@ -327,6 +329,7 @@ def extract_face_crop(image_array: np.ndarray, face_location: tuple, padding: fl
 def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
     """
     Load image from bytes into numpy array with auto-rotation based on EXIF.
+    Includes early resize to prevent memory issues with large mobile photos.
     
     Args:
         image_bytes: Raw image bytes
@@ -361,6 +364,17 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
             # No EXIF data or orientation tag, proceed normally
             logger.debug(f"No EXIF orientation data: {e}")
         
+        # CRITICAL: Early resize to prevent memory exhaustion on large mobile photos
+        # iPhone photos can be 12MP+ which causes worker process to die
+        width, height = image.size
+        max_dim = max(width, height)
+        if max_dim > MAX_IMAGE_PIXELS:
+            scale = MAX_IMAGE_PIXELS / max_dim
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+            logger.info(f"Early resize from {width}x{height} to {new_width}x{new_height} (memory optimization)")
+        
         # Convert to RGB if necessary (handle RGBA, grayscale, etc.)
         if image.mode != 'RGB':
             logger.info(f"Converting image from {image.mode} to RGB")
@@ -375,6 +389,7 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
 def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_type: str) -> Dict:
     """
     Perform forensic analysis to detect potential fake/manipulated images.
+    Optimized for memory efficiency with large mobile photos.
     
     Args:
         image: PIL Image object
@@ -405,12 +420,21 @@ def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_t
     # Note: Don't penalize missing EXIF - mobile apps often strip it
     
     # 2. Check image quality and compression artifacts
+    # Use a smaller version for analysis to save memory
     laplacian_var = 0
     edge_density = 0
     
     try:
+        # Resize for analysis if image is large (memory optimization)
+        h, w = image_array.shape[:2]
+        if max(h, w) > 800:
+            scale = 800 / max(h, w)
+            analysis_image = cv2.resize(image_array, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            analysis_image = image_array
+        
         # Convert to grayscale for analysis
-        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+        gray = cv2.cvtColor(analysis_image, cv2.COLOR_RGB2GRAY)
         
         # Blur detection (Laplacian variance) - NEW: Only flag if VERY blurry (< 25)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
@@ -423,6 +447,9 @@ def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_t
         if edge_density < MIN_EDGE_DENSITY and image_type == 'id_card':
             fraud_indicators.append(f"Low edge density (may be photo of screen)")
         
+        # Clean up
+        del analysis_image, edges
+        
     except Exception as e:
         logger.warning(f"OpenCV analysis failed: {e}")
     
@@ -432,12 +459,21 @@ def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_t
     if avg_brightness < MIN_IMAGE_QUALITY_SCORE:
         fraud_indicators.append("Image too dark (poor quality)")
     
-    # 4. Check for screen patterns (moiré effect) - LESS SENSITIVE
+    # 4. Check for screen patterns (moiré effect) - OPTIMIZED FOR MEMORY
+    # Only run on ID cards and use smaller sample
     if image_type == 'id_card':
         try:
-            gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+            # Use center crop for moiré detection (faster, less memory)
+            h, w = image_array.shape[:2]
+            crop_size = min(512, min(h, w))  # Use max 512x512 sample
+            y_start = (h - crop_size) // 2
+            x_start = (w - crop_size) // 2
+            center_crop = image_array[y_start:y_start+crop_size, x_start:x_start+crop_size]
+            
+            gray_crop = cv2.cvtColor(center_crop, cv2.COLOR_RGB2GRAY)
+            
             # FFT to detect periodic patterns
-            f = np.fft.fft2(gray)
+            f = np.fft.fft2(gray_crop)
             fshift = np.fft.fftshift(f)
             magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
             
@@ -445,11 +481,16 @@ def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_t
             threshold = magnitude_spectrum.mean() + 2 * magnitude_spectrum.std()
             high_freq_count = np.sum(magnitude_spectrum > threshold)
             
-            # Increased threshold from 1000 to 2000 (less sensitive)
-            if high_freq_count > MOIRE_THRESHOLD:
+            # Adjust threshold for smaller sample
+            adjusted_moire_threshold = MOIRE_THRESHOLD * (crop_size / 1000) ** 2
+            if high_freq_count > adjusted_moire_threshold:
                 fraud_indicators.append("Moiré patterns detected (photo of screen)")
-        except:
-            pass
+            
+            # Clean up
+            del center_crop, gray_crop, f, fshift, magnitude_spectrum
+            
+        except Exception as e:
+            logger.warning(f"Moiré detection failed: {e}")
     
     # 5. Check aspect ratio - MORE FLEXIBLE (0.65 to 2.5 for IDs)
     width, height = image.size
@@ -465,16 +506,30 @@ def analyze_image_forensics(image: Image.Image, image_array: np.ndarray, image_t
         if total_pixels < 50000:  # Very low resolution
             fraud_indicators.append("Very low resolution")
     
-    # 6. Check for digital artifacts - simplified
+    # 6. Check for digital artifacts - simplified and memory-safe
     try:
-        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+        # Use smaller image for histogram
+        h, w = image_array.shape[:2]
+        if max(h, w) > 500:
+            scale = 500 / max(h, w)
+            small_img = cv2.resize(image_array, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            small_img = image_array
+            
+        gray = cv2.cvtColor(small_img, cv2.COLOR_RGB2GRAY)
         hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
         # Unusually uniform histogram can indicate manipulation
         hist_std = np.std(hist)
         if hist_std < 50 and image_type == 'id_card':  # More lenient
             fraud_indicators.append("Suspicious histogram uniformity")
+        
+        del small_img, gray, hist
     except:
         pass
+    
+    # Force garbage collection for large images
+    import gc
+    gc.collect()
     
     return {
         "has_exif": has_exif,
@@ -1522,6 +1577,11 @@ async def verify_identity(
             "secondary_checks": comparison_result.get("secondary_checks", {})
         }
         
+        # Clean up memory before returning
+        del selfie_image, id_card_image, selfie_bytes, id_card_bytes
+        del selfie_encoding, id_encoding
+        gc.collect()
+        
         return VerificationResponse(
             match=bool(is_match),
             confidence_score=round(float(confidence_score), 2),
@@ -1538,10 +1598,12 @@ async def verify_identity(
     
     except HTTPException:
         # Re-raise HTTP exceptions (these are handled errors)
+        gc.collect()  # Clean up on error too
         raise
     
     except Exception as e:
         # Catch any unexpected errors
+        gc.collect()  # Clean up on error too
         logger.error(f"Unexpected error during verification: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
