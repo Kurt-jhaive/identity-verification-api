@@ -134,10 +134,11 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
 
-# Configuration
-FACE_MATCH_THRESHOLD = 0.45  # Strict threshold for ID verification (industry standard)
-FACE_MATCH_THRESHOLD_STRICT = 0.40  # Very strict threshold for high-quality images
-FACE_MATCH_THRESHOLD_LENIENT = 0.50  # Lenient threshold for lower-quality images
+# Configuration - Balanced thresholds for real-world ID verification
+# Note: Selfie vs ID card typically has higher distance due to different lighting/angles
+FACE_MATCH_THRESHOLD = 0.50  # Balanced threshold (allows for selfie vs ID differences)
+FACE_MATCH_THRESHOLD_STRICT = 0.45  # Strict threshold for high-quality images
+FACE_MATCH_THRESHOLD_LENIENT = 0.55  # Lenient threshold for lower-quality images
 CONFIDENCE_MULTIPLIER = 100  # For converting distance to percentage
 IDENTICAL_IMAGE_THRESHOLD = 0.02  # Distance below this means likely same image
 MIN_FACE_SIZE = (30, 30)  # Minimum face dimensions in pixels (relaxed for better detection)
@@ -146,8 +147,8 @@ NUM_JITTERS = 1  # Reduced from 2 to save memory (still accurate enough)
 TARGET_IMAGE_SIZE = 800  # Maximum dimension for image preprocessing
 MAX_IMAGE_PIXELS = 1500  # Maximum dimension for initial resize (memory optimization)
 FACE_PADDING = 0.25  # Padding around detected face (25% on each side)
-BORDERLINE_DISTANCE_MIN = 0.40  # Start of borderline range for secondary checks
-BORDERLINE_DISTANCE_MAX = 0.55  # End of borderline range
+BORDERLINE_DISTANCE_MIN = 0.45  # Start of borderline range for secondary checks
+BORDERLINE_DISTANCE_MAX = 0.58  # End of borderline range
 
 # Fraud Detection Thresholds
 MIN_IMAGE_QUALITY_SCORE = 55  # Minimum average pixel brightness (relaxed)
@@ -785,14 +786,14 @@ def calculate_dynamic_threshold(selfie_quality: Dict, id_quality: Dict,
     Calculate adaptive threshold based on image quality and alignment confidence.
     
     Rules:
-    - Base threshold = 0.45 (strict - industry standard for face recognition)
-    - If image quality is low → threshold = 0.50 (slightly more lenient)
-    - If alignment confidence is poor → threshold = 0.52 (max leniency)
+    - Base threshold = 0.50 (balanced for selfie vs ID card comparison)
+    - If image quality is low → threshold = 0.55 (more lenient)
+    - If alignment confidence is poor → threshold = 0.58 (max leniency)
     
     NOTE: Euclidean distance in face_recognition:
-    - < 0.4: Very likely same person
-    - 0.4 - 0.5: Likely same person
-    - 0.5 - 0.6: Uncertain, need verification
+    - < 0.4: Very likely same person (high confidence)
+    - 0.4 - 0.5: Likely same person (good match)
+    - 0.5 - 0.6: Possible match (borderline - use secondary checks)
     - > 0.6: Different people
     
     Args:
@@ -804,23 +805,23 @@ def calculate_dynamic_threshold(selfie_quality: Dict, id_quality: Dict,
     Returns:
         Tuple of (threshold, reasoning)
     """
-    # Start with strict base threshold
-    threshold = 0.45
+    # Start with balanced base threshold for selfie vs ID comparison
+    threshold = 0.50
     reasons = []
     
-    # Check blur scores - NEW SCALE: < 25 is bad, 25-60 moderate, 60+ good
+    # Check blur scores - < 25 is bad, 25-60 moderate, 60+ good
     avg_blur = (selfie_quality.get('laplacian_var', 100) + id_quality.get('laplacian_var', 100)) / 2
     if avg_blur < 25:
-        threshold = 0.52  # Very blurry - maximum leniency
+        threshold = 0.58  # Very blurry - maximum leniency
         reasons.append(f"very blurry images (blur={avg_blur:.1f})")
     elif avg_blur < 60:
-        threshold = 0.48  # Moderately blurry
+        threshold = 0.55  # Moderately blurry
         reasons.append(f"moderately blurry (blur={avg_blur:.1f})")
     
-    # Check brightness - NEW RANGE: 55-200 acceptable
+    # Check brightness - 55-200 acceptable
     avg_brightness = (selfie_quality.get('avg_brightness', 128) + id_quality.get('avg_brightness', 128)) / 2
     if avg_brightness < 55 or avg_brightness > 200:
-        threshold = min(threshold + 0.02, 0.52)
+        threshold = min(threshold + 0.03, 0.58)
         reasons.append(f"poor lighting (brightness={avg_brightness:.1f})")
     
     # Check alignment confidence
@@ -828,27 +829,27 @@ def calculate_dynamic_threshold(selfie_quality: Dict, id_quality: Dict,
     id_conf = id_alignment.get('confidence', 'high')
     
     if selfie_conf == 'low' or id_conf == 'low':
-        threshold = min(threshold + 0.03, 0.52)
+        threshold = min(threshold + 0.05, 0.58)
         reasons.append("poor alignment confidence")
     elif selfie_conf == 'medium' or id_conf == 'medium':
-        threshold = min(threshold + 0.02, 0.50)
+        threshold = min(threshold + 0.03, 0.55)
         reasons.append("moderate alignment")
     
-    # Check fraud indicators count - STRICTER for fraud
+    # Check fraud indicators count - be stricter for suspicious images
     total_fraud_indicators = len(selfie_quality.get('fraud_indicators', [])) + len(id_quality.get('fraud_indicators', []))
     if total_fraud_indicators >= 5:
-        threshold = max(threshold - 0.05, 0.40)  # Much stricter for high fraud risk
+        threshold = max(threshold - 0.08, 0.45)  # Much stricter for high fraud risk
         reasons.append(f"high fraud indicators ({total_fraud_indicators})")
     elif total_fraud_indicators >= 3:
-        threshold = max(threshold - 0.03, 0.42)  # Stricter for moderate fraud risk
+        threshold = max(threshold - 0.05, 0.48)  # Stricter for moderate fraud risk
         reasons.append(f"moderate fraud indicators ({total_fraud_indicators})")
     
-    # Clamp threshold to reasonable range (0.40 - 0.52)
-    threshold = max(0.40, min(0.52, threshold))
+    # Clamp threshold to reasonable range (0.45 - 0.58)
+    threshold = max(0.45, min(0.58, threshold))
     
-    reasoning = f"Threshold {threshold:.2f}: " + ", ".join(reasons) if reasons else f"Using strict threshold {threshold:.2f} (good quality)"
+    reasoning = f"Threshold {threshold:.2f}: " + ", ".join(reasons) if reasons else f"Using base threshold {threshold:.2f} (good quality)"
     
-    logger.info(f"Dynamic threshold: {threshold:.3f} (base: 0.45)")
+    logger.info(f"Dynamic threshold: {threshold:.3f} (base: 0.50)")
     
     return threshold, reasoning
 
@@ -949,25 +950,28 @@ def compare_faces_advanced(selfie_encoding: np.ndarray,
     if BORDERLINE_DISTANCE_MIN <= euclidean_distance <= BORDERLINE_DISTANCE_MAX:
         logger.info(f"Borderline distance {euclidean_distance:.3f}, applying secondary checks...")
         
-        # Check 1: Cosine similarity (must be > 0.85 for same person)
+        # Check 1: Cosine similarity (> 0.80 indicates same person)
         cosine_sim = calculate_cosine_similarity(selfie_encoding, id_encoding)
         secondary_checks['cosine_similarity'] = round(cosine_sim, 4)
         if cosine_sim > 0.85:
+            confidence_boost += 0.04
+            logger.info(f"✓ High cosine similarity: {cosine_sim:.3f} (boost +0.04)")
+        elif cosine_sim > 0.80:
             confidence_boost += 0.02
-            logger.info(f"✓ Cosine similarity: {cosine_sim:.3f} (boost +0.02)")
+            logger.info(f"✓ Good cosine similarity: {cosine_sim:.3f} (boost +0.02)")
         
         # Check 2: Landmark similarity
         landmark_comparison = compare_face_landmarks(selfie_landmarks, id_landmarks)
         secondary_checks['landmark_comparison'] = landmark_comparison
         if landmark_comparison.get('landmarks_match'):
-            confidence_boost += 0.01
-            logger.info(f"✓ Landmarks match (boost +0.01)")
+            confidence_boost += 0.02
+            logger.info(f"✓ Landmarks match (boost +0.02)")
         
         # Check 3: Alternative distance metrics
         manhattan_distance = scipy_distance.cityblock(selfie_encoding, id_encoding)
         secondary_checks['manhattan_distance'] = round(manhattan_distance, 4)
         
-        # Apply confidence boost (reduced from before)
+        # Apply confidence boost
         effective_distance = euclidean_distance - confidence_boost
         secondary_checks['confidence_boost'] = round(confidence_boost, 3)
         secondary_checks['effective_distance'] = round(effective_distance, 4)
