@@ -91,6 +91,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Track if libraries are loaded (for health check)
+libraries_loaded = False
+
+@app.on_event("startup")
+async def startup_event():
+    """Log startup - libraries will be loaded lazily on first request."""
+    logger.info("Application started - ML libraries will load on first request")
+
 # Response models
 class IDVerificationResponse(BaseModel):
     valid: bool
@@ -1074,21 +1082,24 @@ def assess_fraud_risk(all_indicators: List[str]) -> str:
 
 @app.get("/")
 async def root():
-    """Health check endpoint."""
-    return {
-        "status": "online",
-        "service": "Identity Verification API",
-        "version": "1.0.0"
-    }
+    """Root endpoint - fast health check."""
+    return {"status": "online"}
 
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check endpoint."""
+    """Health check endpoint - must respond quickly for Railway."""
+    return {"status": "healthy"}
+
+
+@app.get("/status")
+async def detailed_status():
+    """Detailed status endpoint."""
     return {
         "status": "healthy",
         "service": "Identity Verification API",
-        "face_recognition_available": True,
+        "version": "2.0.0",
+        "libraries_loaded": face_recognition is not None,
         "threshold": FACE_MATCH_THRESHOLD
     }
 
