@@ -3,8 +3,16 @@ FROM python:3.9-slim
 # Set working directory
 WORKDIR /app
 
-# Cache bust - increment this to force rebuild: v2
-ARG CACHE_BUST=2
+# Cache bust - increment this to force rebuild: v3
+ARG CACHE_BUST=3
+
+# Memory optimization environment variables
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Install system dependencies required for dlib, face_recognition, and OpenCV
 RUN apt-get update && apt-get install -y \
@@ -37,4 +45,4 @@ EXPOSE 8000
 # - Single worker to prevent memory exhaustion with large images
 # - Increased timeout for face recognition processing (120s)
 # - Limit concurrency to prevent OOM
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-concurrency", "10"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "120", "--limit-concurrency", "5"]

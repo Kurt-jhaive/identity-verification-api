@@ -6,18 +6,51 @@ A production-ready FastAPI service for face matching between selfie and ID photo
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import face_recognition
 import numpy as np
 from PIL import Image, ImageStat, ExifTags, ImageEnhance
 import io
 from typing import Tuple, Optional, Dict, List
 import logging
 from pydantic import BaseModel
-import cv2
 from datetime import datetime
-from scipy.spatial import distance as scipy_distance
 import math
 import gc  # For memory management
+import os
+
+# Set memory-efficient settings BEFORE importing heavy libraries
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
+# Lazy loading for heavy libraries to allow health check to respond first
+face_recognition = None
+cv2 = None
+scipy_distance = None
+
+def get_face_recognition():
+    """Lazy load face_recognition module to reduce startup memory."""
+    global face_recognition
+    if face_recognition is None:
+        import face_recognition as fr
+        face_recognition = fr
+        gc.collect()
+    return face_recognition
+
+def get_cv2():
+    """Lazy load OpenCV module."""
+    global cv2
+    if cv2 is None:
+        import cv2 as opencv
+        cv2 = opencv
+    return cv2
+
+def get_scipy_distance():
+    """Lazy load scipy distance module."""
+    global scipy_distance
+    if scipy_distance is None:
+        from scipy.spatial import distance as sd
+        scipy_distance = sd
+    return scipy_distance
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +146,18 @@ MIN_IMAGE_QUALITY_SCORE = 55  # Minimum average pixel brightness (relaxed)
 MAX_BLUR_SCORE = 25  # Blur score below this is bad (relaxed - lower = blurrier)
 MIN_EDGE_DENSITY = 0.03  # Minimum edge density for real documents (relaxed)
 MOIRE_THRESHOLD = 2000  # FFT high frequency threshold for moiré (less sensitive)
+
+
+def init_heavy_libraries():
+    """Initialize heavy libraries on first use. Call this before any image processing."""
+    global cv2, face_recognition, scipy_distance
+    if cv2 is None:
+        cv2 = get_cv2()
+    if face_recognition is None:
+        face_recognition = get_face_recognition()
+    if scipy_distance is None:
+        scipy_distance = get_scipy_distance()
+    gc.collect()
 
 
 def preprocess_image(image_array: np.ndarray, target_size: int = TARGET_IMAGE_SIZE) -> np.ndarray:
@@ -1070,6 +1115,9 @@ async def verify_id(
     - fraud_indicators: List of detected issues
     - details: Detailed forensic analysis results
     """
+    # Initialize heavy libraries on first API call
+    init_heavy_libraries()
+    
     try:
         # Validate file type
         allowed_types = ["image/jpeg", "image/jpg", "image/png"]
@@ -1233,6 +1281,9 @@ async def verify_selfie(
     - fraud_indicators: List of detected issues
     - details: Detailed forensic analysis results
     """
+    # Initialize heavy libraries on first API call
+    init_heavy_libraries()
+    
     try:
         # Validate file type
         allowed_types = ["image/jpeg", "image/jpg", "image/png"]
@@ -1401,6 +1452,9 @@ async def verify_identity(
     - ENCODING_FAILED_SELFIE: Failed to encode selfie
     - ENCODING_FAILED_ID: Failed to encode ID card
     """
+    # Initialize heavy libraries on first API call
+    init_heavy_libraries()
+    
     try:
         # Validate file types
         allowed_types = ["image/jpeg", "image/jpg", "image/png"]
