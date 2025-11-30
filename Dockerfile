@@ -3,6 +3,9 @@ FROM python:3.9-slim
 # Set working directory
 WORKDIR /app
 
+# Cache bust - increment this to force rebuild: v2
+ARG CACHE_BUST=2
+
 # Install system dependencies required for dlib, face_recognition, and OpenCV
 RUN apt-get update && apt-get install -y \
     cmake \
